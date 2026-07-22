@@ -19,7 +19,40 @@ env:
   IMAGE_TAG: v1.0.0-rc.21-photon.1
 
 jobs:
+  source-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the fixed source branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: codex/rc.21-photon
+          fetch-depth: 0
+
+      - name: Verify source and scan for secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin --tags "+refs/heads/${SOURCE_BRANCH}:refs/remotes/origin/${SOURCE_BRANCH}"
+          test "$(git rev-parse "refs/remotes/origin/${SOURCE_BRANCH}")" = "${SOURCE_SHA}"
+          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+          test "$(git rev-parse "${BASE_TAG}^{commit}")" = "${BASE_SHA}"
+          test "$(git rev-list --left-right --count "${BASE_TAG}...HEAD")" = $'0\t1'
+          version=8.30.1
+          archive="gitleaks_${version}_linux_x64.tar.gz"
+          expected_sha256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          release="https://github.com/gitleaks/gitleaks/releases/download/v${version}"
+          curl -fsSL "${release}/${archive}" -o "${RUNNER_TEMP}/${archive}"
+          printf '%s  %s\n' "${expected_sha256}" "${RUNNER_TEMP}/${archive}" | \
+            sha256sum --check --strict
+          tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}" gitleaks
+          "${RUNNER_TEMP}/gitleaks" git --redact --no-banner --exit-code 1 .
+          "${RUNNER_TEMP}/gitleaks" dir --redact --no-banner --exit-code 1 .
+
   verify-test-build-push:
+    needs: source-scan
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -48,11 +81,6 @@ jobs:
           test "$(git rev-parse HEAD^)" = "${BASE_SHA}"
           test -z "$(git status --porcelain)"
 
-      - name: Scan the fixed source history and worktree for secrets
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Reject secrets and production data in the build context
         shell: bash
         run: |
@@ -70,6 +98,7 @@ jobs:
           grep -qxF '/web/node_modules' .dockerignore
           grep -qxF '/web/default/dist' .dockerignore
           grep -qxF '/web/classic/dist' .dockerignore
+          test -z "$(git status --porcelain --untracked-files=all)"
 
       - name: Write the fixed application version
         shell: bash
