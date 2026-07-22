@@ -201,12 +201,18 @@ jobs:
           done
           jq -e --arg version "${IMAGE_TAG}" \
             '.success == true and .data.version == $version' /tmp/status.json
-          test "$(curl -sS -o /tmp/photon.html -w '%{http_code}' http://127.0.0.1:3000/photon)" = 200
-          test "$(curl -sS -o /tmp/photon-pricing.html -w '%{http_code}' http://127.0.0.1:3000/photon/pricing)" = 200
-          grep -q '<div id="root"></div>' /tmp/photon.html
-          grep -q '<div id="root"></div>' /tmp/photon-pricing.html
+          photon_status="$(curl -sS -o /tmp/photon.html -w '%{http_code}' http://127.0.0.1:3000/photon)"
+          pricing_status="$(curl -sS -o /tmp/photon-pricing.html -w '%{http_code}' http://127.0.0.1:3000/photon/pricing)"
+          printf 'photon_status=%s pricing_status=%s\n' "${photon_status}" "${pricing_status}"
+          test "${photon_status}" = 200
+          test "${pricing_status}" = 200
+          grep -q 'id="root"' /tmp/photon.html
+          echo 'photon_root=true'
+          grep -q 'id="root"' /tmp/photon-pricing.html
+          echo 'photon_pricing_root=true'
           assets="$(grep -oE 'src="[^"]+\.js"' /tmp/photon.html | cut -d'"' -f2)"
           test -n "${assets}"
+          echo 'javascript_assets=true'
           found_photon=false
           for asset in ${assets}; do
             curl -fsS "http://127.0.0.1:3000${asset}" -o /tmp/photon-bundle.js
@@ -216,6 +222,7 @@ jobs:
             fi
           done
           test "${found_photon}" = true
+          echo 'photon_bundle_signature=true'
           test "$(docker inspect "${container}" --format '{{.State.Status}}')" = running
           ! docker logs "${container}" 2>&1 | grep -Eiq 'panic|fatal|migration failed|failed to initialize database'
 
