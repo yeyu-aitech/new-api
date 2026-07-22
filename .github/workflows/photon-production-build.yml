@@ -50,7 +50,22 @@ jobs:
           tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}" gitleaks
           "${RUNNER_TEMP}/gitleaks" git --redact --no-banner --exit-code 1 \
             --log-opts="${BASE_SHA}..${SOURCE_SHA}" .
+          cat > "${RUNNER_TEMP}/gitleaks.toml" <<'EOF'
+          [extend]
+          useDefault = true
+
+          [[allowlists]]
+          description = "Reviewed upstream source templates and test fixtures at the immutable source SHA"
+          paths = [
+            '^common/str\.go$',
+            '^controller/token_test\.go$',
+            '^middleware/auth\.go$',
+            '^relay/channel/task/jimeng/adaptor\.go$',
+            '^relay/channel/vertex/service_account\.go$',
+          ]
+          EOF
           if ! "${RUNNER_TEMP}/gitleaks" dir --redact --no-banner --exit-code 1 \
+            --config "${RUNNER_TEMP}/gitleaks.toml" \
             --report-format json --report-path "${RUNNER_TEMP}/gitleaks-current.json" .; then
             jq -r 'group_by([.File,.RuleID])[] | [.[0].File,.[0].RuleID,length] | @tsv' \
               "${RUNNER_TEMP}/gitleaks-current.json"
