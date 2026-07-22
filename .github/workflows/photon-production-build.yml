@@ -24,6 +24,7 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
+      attestations: write
       id-token: write
 
     steps:
@@ -107,47 +108,15 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
-      - name: Check whether the immutable tag already exists
-        id: existing
-        shell: bash
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-          IMMUTABLE_TAGS_CONFIRMED: ${{ vars.DOCKERHUB_IMMUTABLE_TAGS_CONFIRMED }}
-        run: |
-          set -euo pipefail
-          test "${IMMUTABLE_TAGS_CONFIRMED}" = true
-          test -n "${DOCKERHUB_USERNAME}"
-          test -n "${DOCKERHUB_TOKEN}"
-          token="$(curl -fsS --get \
-            --data-urlencode "service=registry.docker.io" \
-            --data-urlencode "scope=repository:${IMAGE_REPOSITORY}:pull" \
-            -u "${DOCKERHUB_USERNAME}:${DOCKERHUB_TOKEN}" \
-            https://auth.docker.io/token | jq -r .token)"
-          status="$(curl -sS -o /tmp/manifest.json -w '%{http_code}' \
-            -H "Authorization: Bearer ${token}" \
-            -H 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
-            "https://registry-1.docker.io/v2/${IMAGE_REPOSITORY}/manifests/${IMAGE_TAG}")"
-          if [ "${status}" = 200 ]; then
-            echo "::error::Immutable image tag already exists; refusing to overwrite it"
-            exit 1
-          fi
-          test "${status}" = 404
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@c99871dec2022cc055c062a10cc1a1310835ceb4 # v4.3.0
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Build one attested OCI production artifact
+      - name: Build one local production image
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           platforms: linux/amd64
+          load: true
           push: false
-          outputs: type=oci,dest=/tmp/photon-production.oci.tar
+          tags: ${{ env.IMAGE_REPOSITORY }}:${{ env.IMAGE_TAG }}
           labels: |
             org.opencontainers.image.source=https://github.com/yeyu-aitech/new-api
             org.opencontainers.image.revision=${{ env.SOURCE_SHA }}
@@ -155,18 +124,6 @@ jobs:
             com.tokenpowerhub.new-api.base-revision=${{ env.BASE_SHA }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          provenance: mode=max
-          sbom: true
-
-      - name: Load the exact OCI artifact for smoke testing
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends skopeo
-          skopeo copy --override-os linux --override-arch amd64 \
-            oci-archive:/tmp/photon-production.oci.tar \
-            "docker-daemon:${IMAGE_REPOSITORY}:${IMAGE_TAG}"
 
       - name: Smoke-test the built image
         shell: bash
@@ -207,27 +164,71 @@ jobs:
           test "$(docker inspect "${container}" --format '{{.State.Status}}')" = running
           ! docker logs "${container}" 2>&1 | grep -Eiq 'panic|fatal|migration failed|failed to initialize database'
 
-      - name: Push the exact smoke-tested OCI artifact
-        id: push
+      - name: Package the exact smoke-tested image
+        id: package
         shell: bash
         run: |
           set -euo pipefail
-          source_digest="$(skopeo inspect --format '{{.Digest}}' \
-            oci-archive:/tmp/photon-production.oci.tar)"
-          test -n "${source_digest}"
-          skopeo copy --all --preserve-digests \
-            oci-archive:/tmp/photon-production.oci.tar \
-            "docker://${IMAGE_REPOSITORY}:${IMAGE_TAG}"
-          digest="$(skopeo inspect \
-            --format '{{.Digest}}' \
-            "docker://${IMAGE_REPOSITORY}:${IMAGE_TAG}")"
-          test "${digest}" = "${source_digest}"
-          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+          image_id="$(docker image inspect \
+            "${IMAGE_REPOSITORY}:${IMAGE_TAG}" --format '{{.Id}}')"
+          test -n "${image_id}"
+          docker save "${IMAGE_REPOSITORY}:${IMAGE_TAG}" | gzip -9 > photon-production.docker.tar.gz
+          archive_sha256="$(sha256sum photon-production.docker.tar.gz | awk '{print $1}')"
+          test -n "${archive_sha256}"
+          docker image rm "${IMAGE_REPOSITORY}:${IMAGE_TAG}"
+          gzip -dc photon-production.docker.tar.gz | docker load
+          reloaded_image_id="$(docker image inspect \
+            "${IMAGE_REPOSITORY}:${IMAGE_TAG}" --format '{{.Id}}')"
+          test "${reloaded_image_id}" = "${image_id}"
+          test "$(docker image inspect "${IMAGE_REPOSITORY}:${IMAGE_TAG}" \
+            --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "${SOURCE_SHA}"
+          echo "image_id=${image_id}" >> "${GITHUB_OUTPUT}"
+          echo "archive_sha256=${archive_sha256}" >> "${GITHUB_OUTPUT}"
+
+      - name: Generate an SPDX SBOM for the tested image
+        uses: anchore/sbom-action@a930d0ac434e3182448fe678398ba5713717112a # v0.21.0
+        with:
+          image: ${{ env.IMAGE_REPOSITORY }}:${{ env.IMAGE_TAG }}
+          format: spdx-json
+          output-file: photon-production.spdx.json
+          upload-artifact: false
+
+      - name: Create the release file manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum \
+            photon-production.docker.tar.gz \
+            photon-production.spdx.json \
+            > photon-production.release.sha256
+
+      - name: Attest the packaged production image
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: photon-production.docker.tar.gz
+
+      - name: Attest the release file manifest
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: photon-production.release.sha256
+
+      - name: Upload the production image artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: new-api-v1.0.0-rc.21-photon.1-linux-amd64
+          path: |
+            photon-production.docker.tar.gz
+            photon-production.release.sha256
+            photon-production.spdx.json
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
 
       - name: Publish the immutable build summary
         shell: bash
         env:
-          IMAGE_DIGEST: ${{ steps.push.outputs.digest }}
+          IMAGE_ID: ${{ steps.package.outputs.image_id }}
+          ARCHIVE_SHA256: ${{ steps.package.outputs.archive_sha256 }}
         run: |
           {
             echo '## Photon production image'
@@ -237,8 +238,10 @@ jobs:
             echo "- rc.21 baseline: \`${BASE_SHA}\`"
             echo "- Version difference: \`0 1\`"
             echo "- Image: \`${IMAGE_REPOSITORY}:${IMAGE_TAG}\`"
-            echo "- Digest: \`${IMAGE_DIGEST}\`"
+            echo "- Docker image ID: \`${IMAGE_ID}\`"
+            echo "- Artifact SHA-256: \`${ARCHIVE_SHA256}\`"
             echo '- Platform: `linux/amd64`'
-            echo '- Provenance: `mode=max`'
-            echo '- SBOM: enabled'
+            echo '- Distribution: GitHub Actions artifact (no registry push)'
+            echo '- Provenance: GitHub artifact attestation'
+            echo '- SBOM: SPDX JSON'
           } >> "${GITHUB_STEP_SUMMARY}"
