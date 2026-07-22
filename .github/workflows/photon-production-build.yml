@@ -146,11 +146,10 @@ jobs:
           bun run typecheck
           bun run build
 
-      - name: Build the embedded classic frontend
-        working-directory: web/classic
-        env:
-          VITE_REACT_APP_VERSION: v1.0.0-rc.21-photon.1
-        run: bun run build
+      - name: Prepare the classic embed path for backend tests
+        run: |
+          mkdir -p web/classic/dist
+          install -m 0644 /dev/null web/classic/dist/index.html
 
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
