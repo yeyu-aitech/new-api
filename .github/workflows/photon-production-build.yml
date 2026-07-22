@@ -1,0 +1,244 @@
+name: Build Photon production image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: photon-production-v1.0.0-rc.21-photon.1
+  cancel-in-progress: false
+
+env:
+  SOURCE_BRANCH: codex/rc.21-photon
+  SOURCE_SHA: 53f0c16a85fc6dc5425d7c5889fb2e08000c09c1
+  BASE_TAG: v1.0.0-rc.21
+  BASE_SHA: bde9b2f44887d34ec54799ae191d50f97914359e
+  IMAGE_REPOSITORY: yeyu-aitech/new-api
+  IMAGE_TAG: v1.0.0-rc.21-photon.1
+
+jobs:
+  verify-test-build-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out the fixed source branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: codex/rc.21-photon
+          fetch-depth: 0
+
+      - name: Verify the immutable source and baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin --tags "+refs/heads/${SOURCE_BRANCH}:refs/remotes/origin/${SOURCE_BRANCH}"
+          test "$(git rev-parse "refs/remotes/origin/${SOURCE_BRANCH}")" = "${SOURCE_SHA}"
+          git checkout "${SOURCE_BRANCH}"
+          git reset --hard "${SOURCE_SHA}"
+          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+          test "$(git rev-parse "${BASE_TAG}^{commit}")" = "${BASE_SHA}"
+          test "$(git rev-list --left-right --count "${BASE_TAG}...HEAD")" = $'0\t1'
+          test "$(git rev-parse HEAD^)" = "${BASE_SHA}"
+          test -z "$(git status --porcelain)"
+
+      - name: Scan the fixed source history and worktree for secrets
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Reject secrets and production data in the build context
+        shell: bash
+        run: |
+          set -euo pipefail
+          prohibited="$({
+            git ls-files | grep -E '(^|/)(\.env($|\.)|.*\.(dump|pem|key|p12|pfx)$)' || true
+          } | grep -Ev '(^|/)\.env\.example$' || true)"
+          if [ -n "${prohibited}" ]; then
+            echo "::error::Prohibited secret or data file is tracked in the build context"
+            printf '%s\n' "${prohibited}"
+            exit 1
+          fi
+          grep -qxF '.git' .dockerignore
+          grep -qxF '.github' .dockerignore
+          grep -qxF '/web/node_modules' .dockerignore
+          grep -qxF '/web/default/dist' .dockerignore
+          grep -qxF '/web/classic/dist' .dockerignore
+
+      - name: Write the fixed application version
+        shell: bash
+        run: printf '%s\n' "${IMAGE_TAG}" > VERSION
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.5
+
+      - name: Install frontend dependencies
+        working-directory: web
+        run: bun install --frozen-lockfile
+
+      - name: Test and build the Photon frontend
+        working-directory: web/default
+        env:
+          DISABLE_ESLINT_PLUGIN: "true"
+          VITE_REACT_APP_VERSION: v1.0.0-rc.21-photon.1
+        run: |
+          bun test \
+            src/features/photon/lib/photon-preview-routes.test.ts \
+            src/features/pricing/lib/__tests__/photon-filter-sections.test.ts
+          bun run typecheck
+          bun run build
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test the backend
+        run: go test ./...
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Check whether the immutable tag already exists
+        id: existing
+        shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          IMMUTABLE_TAGS_CONFIRMED: ${{ vars.DOCKERHUB_IMMUTABLE_TAGS_CONFIRMED }}
+        run: |
+          set -euo pipefail
+          test "${IMMUTABLE_TAGS_CONFIRMED}" = true
+          test -n "${DOCKERHUB_USERNAME}"
+          test -n "${DOCKERHUB_TOKEN}"
+          token="$(curl -fsS --get \
+            --data-urlencode "service=registry.docker.io" \
+            --data-urlencode "scope=repository:${IMAGE_REPOSITORY}:pull" \
+            -u "${DOCKERHUB_USERNAME}:${DOCKERHUB_TOKEN}" \
+            https://auth.docker.io/token | jq -r .token)"
+          status="$(curl -sS -o /tmp/manifest.json -w '%{http_code}' \
+            -H "Authorization: Bearer ${token}" \
+            -H 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+            "https://registry-1.docker.io/v2/${IMAGE_REPOSITORY}/manifests/${IMAGE_TAG}")"
+          if [ "${status}" = 200 ]; then
+            echo "::error::Immutable image tag already exists; refusing to overwrite it"
+            exit 1
+          fi
+          test "${status}" = 404
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@c99871dec2022cc055c062a10cc1a1310835ceb4 # v4.3.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build one attested OCI production artifact
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          outputs: type=oci,dest=/tmp/photon-production.oci.tar
+          labels: |
+            org.opencontainers.image.source=https://github.com/yeyu-aitech/new-api
+            org.opencontainers.image.revision=${{ env.SOURCE_SHA }}
+            org.opencontainers.image.version=${{ env.IMAGE_TAG }}
+            com.tokenpowerhub.new-api.base-revision=${{ env.BASE_SHA }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+
+      - name: Load the exact OCI artifact for smoke testing
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends skopeo
+          skopeo copy --override-os linux --override-arch amd64 \
+            oci-archive:/tmp/photon-production.oci.tar \
+            "docker-daemon:${IMAGE_REPOSITORY}:${IMAGE_TAG}"
+
+      - name: Smoke-test the built image
+        shell: bash
+        run: |
+          set -euo pipefail
+          container=photon-build-smoke
+          cleanup() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker run -d --name "${container}" -p 127.0.0.1:3000:3000 \
+            "${IMAGE_REPOSITORY}:${IMAGE_TAG}"
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:3000/api/status > /tmp/status.json; then
+              break
+            fi
+            if [ "${attempt}" = 60 ]; then
+              docker logs "${container}" --tail 200
+              exit 1
+            fi
+            sleep 2
+          done
+          jq -e --arg version "${IMAGE_TAG}" \
+            '.success == true and .data.version == $version' /tmp/status.json
+          test "$(curl -sS -o /tmp/photon.html -w '%{http_code}' http://127.0.0.1:3000/photon)" = 200
+          test "$(curl -sS -o /tmp/photon-pricing.html -w '%{http_code}' http://127.0.0.1:3000/photon/pricing)" = 200
+          grep -q '<div id="root"></div>' /tmp/photon.html
+          grep -q '<div id="root"></div>' /tmp/photon-pricing.html
+          assets="$(grep -oE 'src="[^"]+\.js"' /tmp/photon.html | cut -d'"' -f2)"
+          test -n "${assets}"
+          found_photon=false
+          for asset in ${assets}; do
+            curl -fsS "http://127.0.0.1:3000${asset}" -o /tmp/photon-bundle.js
+            if grep -Fq 'Unified OpenAI-compatible AI gateway' /tmp/photon-bundle.js; then
+              found_photon=true
+              break
+            fi
+          done
+          test "${found_photon}" = true
+          test "$(docker inspect "${container}" --format '{{.State.Status}}')" = running
+          ! docker logs "${container}" 2>&1 | grep -Eiq 'panic|fatal|migration failed|failed to initialize database'
+
+      - name: Push the exact smoke-tested OCI artifact
+        id: push
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_digest="$(skopeo inspect --format '{{.Digest}}' \
+            oci-archive:/tmp/photon-production.oci.tar)"
+          test -n "${source_digest}"
+          skopeo copy --all --preserve-digests \
+            oci-archive:/tmp/photon-production.oci.tar \
+            "docker://${IMAGE_REPOSITORY}:${IMAGE_TAG}"
+          digest="$(skopeo inspect \
+            --format '{{.Digest}}' \
+            "docker://${IMAGE_REPOSITORY}:${IMAGE_TAG}")"
+          test "${digest}" = "${source_digest}"
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+
+      - name: Publish the immutable build summary
+        shell: bash
+        env:
+          IMAGE_DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo '## Photon production image'
+            echo
+            echo "- Source branch: \`${SOURCE_BRANCH}\`"
+            echo "- Source commit: \`${SOURCE_SHA}\`"
+            echo "- rc.21 baseline: \`${BASE_SHA}\`"
+            echo "- Version difference: \`0 1\`"
+            echo "- Image: \`${IMAGE_REPOSITORY}:${IMAGE_TAG}\`"
+            echo "- Digest: \`${IMAGE_DIGEST}\`"
+            echo '- Platform: `linux/amd64`'
+            echo '- Provenance: `mode=max`'
+            echo '- SBOM: enabled'
+          } >> "${GITHUB_STEP_SUMMARY}"
