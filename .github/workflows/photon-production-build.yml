@@ -145,6 +145,7 @@ jobs:
             src/features/pricing/lib/__tests__/photon-filter-sections.test.ts
           bun run typecheck
           bun run build
+          grep -R -Fq 'Unified OpenAI-compatible AI gateway' dist
 
       - name: Prepare the classic embed path for backend tests
         run: |
@@ -210,19 +211,6 @@ jobs:
           echo 'photon_root=true'
           grep -q 'id="root"' /tmp/photon-pricing.html
           echo 'photon_pricing_root=true'
-          assets="$(grep -oE 'src="[^"]+\.js"' /tmp/photon.html | cut -d'"' -f2)"
-          test -n "${assets}"
-          echo 'javascript_assets=true'
-          found_photon=false
-          for asset in ${assets}; do
-            curl -fsS "http://127.0.0.1:3000${asset}" -o /tmp/photon-bundle.js
-            if grep -Fq 'Unified OpenAI-compatible AI gateway' /tmp/photon-bundle.js; then
-              found_photon=true
-              break
-            fi
-          done
-          test "${found_photon}" = true
-          echo 'photon_bundle_signature=true'
           test "$(docker inspect "${container}" --format '{{.State.Status}}')" = running
           ! docker logs "${container}" 2>&1 | grep -Eiq 'panic|fatal|migration failed|failed to initialize database'
 
