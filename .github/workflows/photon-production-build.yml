@@ -50,7 +50,12 @@ jobs:
           tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}" gitleaks
           "${RUNNER_TEMP}/gitleaks" git --redact --no-banner --exit-code 1 \
             --log-opts="${BASE_SHA}..${SOURCE_SHA}" .
-          "${RUNNER_TEMP}/gitleaks" dir --redact --no-banner --exit-code 1 .
+          if ! "${RUNNER_TEMP}/gitleaks" dir --redact --no-banner --exit-code 1 \
+            --report-format json --report-path "${RUNNER_TEMP}/gitleaks-current.json" .; then
+            jq -r 'group_by([.File,.RuleID])[] | [.[0].File,.[0].RuleID,length] | @tsv' \
+              "${RUNNER_TEMP}/gitleaks-current.json"
+            exit 1
+          fi
 
   verify-test-build-push:
     needs: source-scan
