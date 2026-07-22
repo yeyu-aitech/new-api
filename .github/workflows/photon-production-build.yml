@@ -48,7 +48,8 @@ jobs:
           printf '%s  %s\n' "${expected_sha256}" "${RUNNER_TEMP}/${archive}" | \
             sha256sum --check --strict
           tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}" gitleaks
-          "${RUNNER_TEMP}/gitleaks" git --redact --no-banner --exit-code 1 .
+          "${RUNNER_TEMP}/gitleaks" git --redact --no-banner --exit-code 1 \
+            --log-opts="${BASE_SHA}..${SOURCE_SHA}" .
           "${RUNNER_TEMP}/gitleaks" dir --redact --no-banner --exit-code 1 .
 
   verify-test-build-push:
