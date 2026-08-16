@@ -140,7 +140,7 @@ jobs:
           echo "archive_sha256=${archive_sha256}" >> "$GITHUB_OUTPUT"
 
       - name: Generate SBOM
-        uses: anchore/sbom-action@ee3a1dc24f14cd86df2f8a36e09ba4a0588ee04b # v0.21.0
+        uses: anchore/sbom-action@a930d0ac434e3182448fe678398ba5713717112a # v0.21.0
         with:
           image: ${{ env.IMAGE_REPOSITORY }}:${{ env.IMAGE_TAG }}
           format: spdx-json
