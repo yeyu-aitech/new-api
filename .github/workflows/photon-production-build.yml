@@ -1,0 +1,297 @@
+name: Build Photon production image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: photon-production-v1.0.0-rc.21-photon.1
+  cancel-in-progress: false
+
+env:
+  SOURCE_BRANCH: codex/rc.21-photon
+  SOURCE_SHA: 53f0c16a85fc6dc5425d7c5889fb2e08000c09c1
+  BASE_TAG: v1.0.0-rc.21
+  BASE_SHA: bde9b2f44887d34ec54799ae191d50f97914359e
+  IMAGE_REPOSITORY: yeyu-aitech/new-api
+  IMAGE_TAG: v1.0.0-rc.21-photon.1
+
+jobs:
+  source-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the fixed source branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: codex/rc.21-photon
+          fetch-depth: 0
+
+      - name: Verify source and scan for secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin --tags "+refs/heads/${SOURCE_BRANCH}:refs/remotes/origin/${SOURCE_BRANCH}"
+          test "$(git rev-parse "refs/remotes/origin/${SOURCE_BRANCH}")" = "${SOURCE_SHA}"
+          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+          test "$(git rev-parse "${BASE_TAG}^{commit}")" = "${BASE_SHA}"
+          test "$(git rev-list --left-right --count "${BASE_TAG}...HEAD")" = $'0\t1'
+          version=8.30.1
+          archive="gitleaks_${version}_linux_x64.tar.gz"
+          expected_sha256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          release="https://github.com/gitleaks/gitleaks/releases/download/v${version}"
+          curl -fsSL "${release}/${archive}" -o "${RUNNER_TEMP}/${archive}"
+          printf '%s  %s\n' "${expected_sha256}" "${RUNNER_TEMP}/${archive}" | \
+            sha256sum --check --strict
+          tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}" gitleaks
+          "${RUNNER_TEMP}/gitleaks" git --redact --no-banner --exit-code 1 \
+            --log-opts="${BASE_SHA}..${SOURCE_SHA}" .
+          cat > "${RUNNER_TEMP}/gitleaks.toml" <<'EOF'
+          [extend]
+          useDefault = true
+
+          [[allowlists]]
+          description = "Reviewed upstream source templates and test fixtures at the immutable source SHA"
+          paths = [
+            '^common/str\.go$',
+            '^controller/token_test\.go$',
+            '^middleware/auth\.go$',
+            '^relay/channel/task/jimeng/adaptor\.go$',
+            '^relay/channel/vertex/service_account\.go$',
+          ]
+          EOF
+          if ! "${RUNNER_TEMP}/gitleaks" dir --redact --no-banner --exit-code 1 \
+            --config "${RUNNER_TEMP}/gitleaks.toml" \
+            --report-format json --report-path "${RUNNER_TEMP}/gitleaks-current.json" .; then
+            jq -r 'group_by([.File,.RuleID])[] | [.[0].File,.[0].RuleID,length] | @tsv' \
+              "${RUNNER_TEMP}/gitleaks-current.json"
+            exit 1
+          fi
+
+  verify-test-build-push:
+    needs: source-scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+
+    steps:
+      - name: Check out the fixed source branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: codex/rc.21-photon
+          fetch-depth: 0
+
+      - name: Verify the immutable source and baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin --tags "+refs/heads/${SOURCE_BRANCH}:refs/remotes/origin/${SOURCE_BRANCH}"
+          test "$(git rev-parse "refs/remotes/origin/${SOURCE_BRANCH}")" = "${SOURCE_SHA}"
+          git checkout "${SOURCE_BRANCH}"
+          git reset --hard "${SOURCE_SHA}"
+          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+          test "$(git rev-parse "${BASE_TAG}^{commit}")" = "${BASE_SHA}"
+          test "$(git rev-list --left-right --count "${BASE_TAG}...HEAD")" = $'0\t1'
+          test "$(git rev-parse HEAD^)" = "${BASE_SHA}"
+          test -z "$(git status --porcelain)"
+
+      - name: Reject secrets and production data in the build context
+        shell: bash
+        run: |
+          set -euo pipefail
+          prohibited="$({
+            git ls-files | grep -E '(^|/)(\.env($|\.)|.*\.(dump|pem|key|p12|pfx)$)' || true
+          } | grep -Ev '(^|/)\.env\.example$' || true)"
+          if [ -n "${prohibited}" ]; then
+            echo "::error::Prohibited secret or data file is tracked in the build context"
+            printf '%s\n' "${prohibited}"
+            exit 1
+          fi
+          grep -qxF '.git' .dockerignore
+          grep -qxF '.github' .dockerignore
+          grep -qxF '/web/node_modules' .dockerignore
+          grep -qxF '/web/default/dist' .dockerignore
+          grep -qxF '/web/classic/dist' .dockerignore
+          test -z "$(git status --porcelain --untracked-files=all)"
+
+      - name: Write the fixed application version
+        shell: bash
+        run: printf '%s\n' "${IMAGE_TAG}" > VERSION
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.5
+
+      - name: Install frontend dependencies
+        working-directory: web
+        run: bun install --frozen-lockfile
+
+      - name: Test and build the Photon frontend
+        working-directory: web/default
+        env:
+          DISABLE_ESLINT_PLUGIN: "true"
+          VITE_REACT_APP_VERSION: v1.0.0-rc.21-photon.1
+        run: |
+          bun test \
+            src/features/photon/lib/photon-preview-routes.test.ts \
+            src/features/pricing/lib/__tests__/photon-filter-sections.test.ts
+          bun run typecheck
+          bun run build
+          grep -R -Fq 'Unified OpenAI-compatible AI gateway' dist
+
+      - name: Prepare the classic embed path for backend tests
+        run: |
+          mkdir -p web/classic/dist
+          install -m 0644 /dev/null web/classic/dist/index.html
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test the backend
+        run: go test ./...
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build one local production image
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: ${{ env.IMAGE_REPOSITORY }}:${{ env.IMAGE_TAG }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/yeyu-aitech/new-api
+            org.opencontainers.image.revision=${{ env.SOURCE_SHA }}
+            org.opencontainers.image.version=${{ env.IMAGE_TAG }}
+            com.tokenpowerhub.new-api.base-revision=${{ env.BASE_SHA }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke-test the built image
+        shell: bash
+        run: |
+          set -euo pipefail
+          container=photon-build-smoke
+          cleanup() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker run -d --name "${container}" -p 127.0.0.1:3000:3000 \
+            "${IMAGE_REPOSITORY}:${IMAGE_TAG}"
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:3000/api/status > /tmp/status.json; then
+              break
+            fi
+            if [ "${attempt}" = 60 ]; then
+              docker logs "${container}" --tail 200
+              exit 1
+            fi
+            sleep 2
+          done
+          jq -e --arg version "${IMAGE_TAG}" \
+            '.success == true and .data.version == $version' /tmp/status.json
+          photon_status="$(curl -sS -o /tmp/photon.html -w '%{http_code}' http://127.0.0.1:3000/photon)"
+          pricing_status="$(curl -sS -o /tmp/photon-pricing.html -w '%{http_code}' http://127.0.0.1:3000/photon/pricing)"
+          printf 'photon_status=%s pricing_status=%s\n' "${photon_status}" "${pricing_status}"
+          test "${photon_status}" = 200
+          test "${pricing_status}" = 200
+          grep -q 'id="root"' /tmp/photon.html
+          echo 'photon_root=true'
+          grep -q 'id="root"' /tmp/photon-pricing.html
+          echo 'photon_pricing_root=true'
+          test "$(docker inspect "${container}" --format '{{.State.Status}}')" = running
+          ! docker logs "${container}" 2>&1 | grep -Eiq 'panic|fatal|migration failed|failed to initialize database'
+
+      - name: Package the exact smoke-tested image
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_id="$(docker image inspect \
+            "${IMAGE_REPOSITORY}:${IMAGE_TAG}" --format '{{.Id}}')"
+          test -n "${image_id}"
+          docker save "${IMAGE_REPOSITORY}:${IMAGE_TAG}" | gzip -9 > photon-production.docker.tar.gz
+          archive_sha256="$(sha256sum photon-production.docker.tar.gz | awk '{print $1}')"
+          test -n "${archive_sha256}"
+          docker image rm "${IMAGE_REPOSITORY}:${IMAGE_TAG}"
+          gzip -dc photon-production.docker.tar.gz | docker load
+          reloaded_image_id="$(docker image inspect \
+            "${IMAGE_REPOSITORY}:${IMAGE_TAG}" --format '{{.Id}}')"
+          test "${reloaded_image_id}" = "${image_id}"
+          test "$(docker image inspect "${IMAGE_REPOSITORY}:${IMAGE_TAG}" \
+            --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "${SOURCE_SHA}"
+          echo "image_id=${image_id}" >> "${GITHUB_OUTPUT}"
+          echo "archive_sha256=${archive_sha256}" >> "${GITHUB_OUTPUT}"
+
+      - name: Generate an SPDX SBOM for the tested image
+        uses: anchore/sbom-action@a930d0ac434e3182448fe678398ba5713717112a # v0.21.0
+        with:
+          image: ${{ env.IMAGE_REPOSITORY }}:${{ env.IMAGE_TAG }}
+          format: spdx-json
+          output-file: photon-production.spdx.json
+          upload-artifact: false
+
+      - name: Create the release file manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum \
+            photon-production.docker.tar.gz \
+            photon-production.spdx.json \
+            > photon-production.release.sha256
+
+      - name: Attest the packaged production image
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: photon-production.docker.tar.gz
+
+      - name: Attest the release file manifest
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: photon-production.release.sha256
+
+      - name: Upload the production image artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: new-api-v1.0.0-rc.21-photon.1-linux-amd64
+          path: |
+            photon-production.docker.tar.gz
+            photon-production.release.sha256
+            photon-production.spdx.json
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+
+      - name: Publish the immutable build summary
+        shell: bash
+        env:
+          IMAGE_ID: ${{ steps.package.outputs.image_id }}
+          ARCHIVE_SHA256: ${{ steps.package.outputs.archive_sha256 }}
+        run: |
+          {
+            echo '## Photon production image'
+            echo
+            echo "- Source branch: \`${SOURCE_BRANCH}\`"
+            echo "- Source commit: \`${SOURCE_SHA}\`"
+            echo "- rc.21 baseline: \`${BASE_SHA}\`"
+            echo "- Version difference: \`0 1\`"
+            echo "- Image: \`${IMAGE_REPOSITORY}:${IMAGE_TAG}\`"
+            echo "- Docker image ID: \`${IMAGE_ID}\`"
+            echo "- Artifact SHA-256: \`${ARCHIVE_SHA256}\`"
+            echo '- Platform: `linux/amd64`'
+            echo '- Distribution: GitHub Actions artifact (no registry push)'
+            echo '- Provenance: GitHub artifact attestation'
+            echo '- SBOM: SPDX JSON'
+          } >> "${GITHUB_STEP_SUMMARY}"
