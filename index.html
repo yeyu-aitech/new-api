@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TokenPower Hub — 豆包 / 通义 / 混元 API 一站询价开通</title>
+<meta name="description" content="火山方舟、阿里百炼、腾讯混元大模型 API 比价、开通与用量托管。OpenAI 兼容接口一处接入，按量透明计费。">
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel-2: #1c2128;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #3fb950;
+    --accent-2: #58a6ff;
+    --warn: #d29922;
+    --radius: 10px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", "Microsoft YaHei", sans-serif;
+    line-height: 1.6; padding-bottom: 60px;
+  }
+  a { color: var(--accent-2); text-decoration: none; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 0 20px; }
+
+  header.site {
+    border-bottom: 1px solid var(--border);
+    padding: 14px 0; position: sticky; top: 0; background: rgba(13,17,23,.92); backdrop-filter: blur(6px); z-index: 10;
+  }
+  header.site .wrap { display: flex; align-items: center; justify-content: space-between; }
+  .brand { font-weight: 700; font-size: 17px; letter-spacing: .3px; }
+  .brand span { color: var(--accent); }
+  header nav a { margin-left: 18px; font-size: 14px; color: var(--muted); }
+  header nav a:hover { color: var(--text); }
+
+  .hero { padding: 64px 0 40px; text-align: center; }
+  .hero h1 { font-size: 34px; line-height: 1.3; margin-bottom: 14px; }
+  .hero h1 em { font-style: normal; color: var(--accent); }
+  .hero p.sub { color: var(--muted); font-size: 16px; max-width: 640px; margin: 0 auto 28px; }
+  .btn {
+    display: inline-block; padding: 11px 26px; border-radius: var(--radius);
+    font-size: 15px; font-weight: 600; cursor: pointer; border: 1px solid transparent;
+  }
+  .btn-primary { background: var(--accent); color: #0d1117; }
+  .btn-primary:hover { filter: brightness(1.1); }
+  .btn-ghost { background: transparent; color: var(--text); border-color: var(--border); margin-left: 12px; }
+  .btn-ghost:hover { border-color: var(--muted); }
+
+  section { padding: 40px 0 8px; }
+  section > h2 { font-size: 22px; margin-bottom: 6px; }
+  section > p.desc { color: var(--muted); font-size: 14px; margin-bottom: 20px; }
+
+  /* 价格表 */
+  .price-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+    overflow: hidden; overflow-x: auto;
+  }
+  table.price { width: 100%; border-collapse: collapse; font-size: 14px; min-width: 640px; }
+  table.price th, table.price td { padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--border); }
+  table.price th { background: var(--panel-2); color: var(--muted); font-weight: 600; white-space: nowrap; }
+  table.price td.model { font-family: var(--mono); color: var(--accent-2); white-space: nowrap; }
+  table.price td.num { font-family: var(--mono); white-space: nowrap; }
+  table.price tr:last-child td { border-bottom: none; }
+  .unit { color: var(--muted); font-size: 12px; }
+  .price-note { color: var(--muted); font-size: 12.5px; margin-top: 10px; }
+
+  /* 价值点 */
+  .value-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  @media (max-width: 720px) { .value-grid { grid-template-columns: 1fr; } }
+  .value {
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px;
+  }
+  .value h3 { font-size: 16px; margin-bottom: 8px; }
+  .value h3 .tag { font-family: var(--mono); color: var(--accent); font-size: 13px; margin-right: 6px; }
+  .value p { color: var(--muted); font-size: 13.5px; }
+
+  /* 表单 */
+  .form-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 26px;
+  }
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 720px) { .form-grid { grid-template-columns: 1fr; } }
+  .field label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  .field label b { color: var(--warn); }
+  .field input, .field select, .field textarea {
+    width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text); padding: 10px 12px; font-size: 14px; font-family: inherit;
+  }
+  .field textarea { min-height: 90px; resize: vertical; }
+  .field input:focus, .field select:focus, .field textarea:focus { outline: none; border-color: var(--accent-2); }
+  .form-actions { margin-top: 18px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .form-msg { font-size: 13.5px; }
+  .form-msg.ok { color: var(--accent); }
+  .form-msg.err { color: #f85149; }
+  .wechat-fallback { color: var(--muted); font-size: 13px; }
+  .wechat-fallback code { font-family: var(--mono); color: var(--accent); }
+
+  /* FAQ */
+  .faq details {
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 14px 18px; margin-bottom: 10px;
+  }
+  .faq summary { cursor: pointer; font-size: 14.5px; font-weight: 600; }
+  .faq details p { color: var(--muted); font-size: 13.5px; margin-top: 8px; }
+
+  footer.site { border-top: 1px solid var(--border); margin-top: 48px; padding: 24px 0; }
+  footer.site .wrap { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px; color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+
+<header class="site">
+  <div class="wrap">
+    <div class="brand">TokenPower<span>·Hub</span></div>
+    <nav>
+      <a href="#price">价格速览</a>
+      <a href="#apply">申请试用</a>
+      <a href="#faq">FAQ</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <div class="hero">
+    <h1>豆包 · 通义 · 混元<br><em>一个入口，比价、开通、用起来</em></h1>
+    <p class="sub">火山方舟 / 阿里百炼 / 腾讯混元 大模型 API 聚合开通。OpenAI 兼容接口，一处接入切换三云模型；按量透明计费，对齐官方刊例。</p>
+    <a class="btn btn-primary" href="#apply" data-track="cta_hero_apply">申请试用额度</a>
+    <a class="btn btn-ghost" href="#price" data-track="cta_hero_price">先看价格</a>
+  </div>
+
+  <section id="price">
+    <h2>三云价格速览</h2>
+    <p class="desc">主流文生文型号刊例价速览，单位：元 / 百万 tokens。</p>
+    <div class="price-card">
+      <table class="price">
+        <thead>
+          <tr>
+            <th>云平台</th><th>模型</th><th>输入</th><th>输出</th><th>备注</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>火山方舟</td><td class="model">Doubao-Seed-2.0-pro</td><td class="num">3.2 起</td><td class="num">16 起</td><td>缓存命中 0.64 起</td></tr>
+          <tr><td>火山方舟</td><td class="model">豆包推理旗舰</td><td class="num">6</td><td class="num">30</td><td>上下文 1024k</td></tr>
+          <tr><td>阿里百炼</td><td class="model">qwen-plus</td><td class="num">2.936</td><td class="num">8.807</td><td>思考输出 29.357</td></tr>
+          <tr><td>阿里百炼</td><td class="model">Qwen-Max</td><td class="num">≈2.4</td><td class="num">≈9.6</td><td>以官网实时价为准</td></tr>
+          <tr><td>腾讯混元</td><td class="model">Hunyuan-a13b</td><td class="num">0.5</td><td class="num">2</td><td>官方计费文档刊例</td></tr>
+          <tr><td>腾讯混元</td><td class="model">Hunyuan-role-latest</td><td class="num">2.4</td><td class="num">9.6</td><td>角色扮演场景</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="price-note">
+      数据来源：火山方舟官网、阿里百炼模型广场、腾讯云混元生文计费文档；查询日期 2026-10-12。价格随官方调整变动，「以官网为准」；本页报价仅作选型参考，开通时以当日报价确认为准。
+    </p>
+  </section>
+
+  <section id="value">
+    <h2>为什么走 TokenPower Hub</h2>
+    <p class="desc">面向开发者的三件事：接得快、算得清、有人管。</p>
+    <div class="value-grid">
+      <div class="value">
+        <h3><span class="tag">01</span>一处接入</h3>
+        <p>OpenAI 兼容格式接口，一个 key 切换豆包 / Qwen / 混元。不改业务代码，换模型只改模型名。</p>
+      </div>
+      <div class="value">
+        <h3><span class="tag">02</span>透明计费</h3>
+        <p>按 token 用量计费，价格对齐各云官方刊例，无最低消费、无隐藏加价，用量明细可查。</p>
+      </div>
+      <div class="value">
+        <h3><span class="tag">03</span>快速开通</h3>
+        <p>填一张表说明场景，人工对接开通试用额度，一个工作日内给到 key 与接入示例。</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="apply">
+    <h2>申请试用</h2>
+    <p class="desc">留下需求，人工对接开通。带 <b>*</b> 为必填。</p>
+    <div class="form-card">
+      <form id="applyForm" novalidate>
+        <div class="form-grid">
+          <div class="field">
+            <label for="f_company">公司 / 团队名称 <b>*</b></label>
+            <input id="f_company" name="company" type="text" placeholder="如：某某科技（个人可填「个人开发者」）" required>
+          </div>
+          <div class="field">
+            <label for="f_contact">联系方式 <b>*</b></label>
+            <input id="f_contact" name="contact" type="text" placeholder="微信 / 手机 / 邮箱 任一" required>
+          </div>
+          <div class="field">
+            <label for="f_scene">使用场景</label>
+            <select id="f_scene" name="scene">
+              <option value="">请选择（可选）</option>
+              <option>智能客服 / 对话机器人</option>
+              <option>内容生成 / 写作辅助</option>
+              <option>代码辅助 / Agent</option>
+              <option>数据提取 / 结构化</option>
+              <option>其他</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="f_expect">期望模型 / 云</label>
+            <input id="f_expect" name="expect" type="text" placeholder="如：Doubao-Seed-2.0-pro / qwen-plus，可不填">
+          </div>
+          <div class="field" style="grid-column: 1 / -1;">
+            <label for="f_desc">需求说明</label>
+            <textarea id="f_desc" name="desc" placeholder="粗略日调用量、时延要求、是否需流式等，越具体报价越准（可选）"></textarea>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-primary" type="submit">提交申请</button>
+          <span class="form-msg" id="formMsg"></span>
+          <span class="wechat-fallback" id="wechatFallback" hidden>或直接加微信：<code id="wechatId"></code></span>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <section id="faq" class="faq">
+    <h2>常见问题</h2>
+    <p class="desc">5 条最常被问到的。</p>
+    <details>
+      <summary>你们是官方直连吗？</summary>
+      <p>是。各云模型均通过官方 API 接入，价格对齐官方刊例；我们提供的是聚合接入、计费与用量托管，不改变模型本身的输出。</p>
+    </details>
+    <details>
+      <summary>怎么计费？</summary>
+      <p>按 token 用量计费，充值余额扣减，无最低消费。输入 / 输出 / 缓存命中分别计价，费率以开通时确认的当日报价为准。</p>
+    </details>
+    <details>
+      <summary>支持哪些模型？</summary>
+      <p>当前覆盖火山方舟（豆包系列）、阿里百炼（Qwen 系列）、腾讯混元系列主流文生文型号，持续增加中；需要其他型号可在申请表说明。</p>
+    </details>
+    <details>
+      <summary>有免费试用额度吗？</summary>
+      <p>有。填写上方申请表单，审核通过后发放试用额度，足够跑通接入验证与小规模评估。</p>
+    </details>
+    <details>
+      <summary>怎么开始？</summary>
+      <p>提交申请表单，或直接加微信沟通。开通后你会拿到：OpenAI 兼容 base_url、API key、接入示例与用量看板。</p>
+    </details>
+  </section>
+
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <div>© 2026 TokenPower Hub · 大模型 API 聚合开通</div>
+    <div>询价 / 接入：<span id="footerWechat">微信见「申请试用」</span></div>
+  </div>
+</footer>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ===== 配置占位（未配置时不触发对应功能） ===== */
+  var WEBHOOK_URL = '';   // 飞书群机器人 / 企业微信 webhook：表单提交推送。为空时提交仅本地确认。
+  var WECHAT_ID   = '';   // 询价微信号。为空时页面隐藏微信入口，仅保留表单。
+  var TRACK_URL   = '';   // 埋点上报地址。为空时仅本地累计，不上报。
+
+  /* ===== 轻量埋点：track(event, data) ===== */
+  function track(event, data) {
+    try {
+      var payload = {
+        event: event,
+        data: data || {},
+        path: location.pathname,
+        ref: document.referrer || '',
+        ts: Date.now()
+      };
+      if (TRACK_URL && navigator.sendBeacon) {
+        navigator.sendBeacon(TRACK_URL, JSON.stringify(payload));
+      } else {
+        var k = 'tph_events', arr = [];
+        try { arr = JSON.parse(localStorage.getItem(k) || '[]'); } catch (e) {}
+        arr.push(payload);
+        localStorage.setItem(k, JSON.stringify(arr.slice(-200)));
+      }
+    } catch (e) {}
+  }
+  window.__tphTrack = track;
+
+  track('page_view');
+
+  /* 曝光埋点：价格表进入视口 */
+  var priceTable = document.querySelector('.price-card');
+  if (priceTable && 'IntersectionObserver' in window) {
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (en) {
+        if (en.isIntersecting) { track('price_table_view'); io.disconnect(); }
+      });
+    }, { threshold: 0.4 });
+    io.observe(priceTable);
+  }
+
+  /* CTA 点击埋点（含导航与按钮） */
+  document.querySelectorAll('[data-track]').forEach(function (el) {
+    el.addEventListener('click', function () { track('cta_click', { id: el.getAttribute('data-track') }); });
+  });
+
+  /* 微信号占位：未配置则隐藏入口 */
+  if (WECHAT_ID) {
+    document.getElementById('wechatId').textContent = WECHAT_ID;
+    document.getElementById('wechatFallback').hidden = false;
+    document.getElementById('footerWechat').textContent = '微信 ' + WECHAT_ID;
+  }
+
+  /* 表单提交：webhook 为空时仅本地确认，不触发外部请求 */
+  var form = document.getElementById('applyForm');
+  var msg = document.getElementById('formMsg');
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var company = form.company.value.trim();
+    var contact = form.contact.value.trim();
+    if (!company || !contact) {
+      msg.className = 'form-msg err';
+      msg.textContent = '请至少填写「公司 / 团队名称」和「联系方式」。';
+      track('form_error', { reason: 'required' });
+      return;
+    }
+    var data = {
+      company: company,
+      contact: contact,
+      scene: form.scene.value,
+      expect: form.expect.value.trim(),
+      desc: form.desc.value.trim(),
+      page: location.href
+    };
+    track('form_submit', { scene: data.scene });
+
+    if (!WEBHOOK_URL) {
+      msg.className = 'form-msg ok';
+      msg.textContent = '已记录（本地）。提交通道配置中，请通过微信联系开通。';
+      track('form_local_saved');
+      form.reset();
+      return;
+    }
+    fetch(WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ msg_type: 'text', content: { text: '[TokenPower Hub 试用申请] ' + JSON.stringify(data) } })
+    }).then(function (res) {
+      if (res.ok) {
+        msg.className = 'form-msg ok';
+        msg.textContent = '提交成功，我们会尽快联系你开通。';
+        track('form_success');
+        form.reset();
+      } else {
+        throw new Error('http ' + res.status);
+      }
+    }).catch(function () {
+      msg.className = 'form-msg err';
+      msg.textContent = '提交失败，请稍后重试或加微信联系。';
+      track('form_error', { reason: 'network' });
+    });
+  });
+})();
+</script>
+</body>
+</html>
